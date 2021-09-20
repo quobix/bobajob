@@ -1,90 +1,75 @@
 package bobajob
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/gob"
+	"fmt"
 	"github.com/google/uuid"
-	"github.com/vmware/transport-go/plank/utils"
+	"github.com/vmware/transport-go/bridge"
+	"sync"
 )
 
-
-type RunnableJob interface {
-	Run()
-	//HasCompleted()
-}
 type JobEnvelope struct {
-	Id string
-	Payload string
+	Id        string
+	Payload   string
+	SentBy    string
+	HandledBy string
+	Version   int
+	Hops      int
 }
 
-type JobResult struct {
-	Payload string
+type Bob interface {
+	GetInput() string
+	HandleOutput(result string)
 }
 
 type Job struct {
-	uuid.UUID
-	SequenceId int
-	RequestPayload []byte
-	ResponsePayload []byte
-	CompletedBy string
-	completed bool
-	troop *Troop
+	Id         string
+	Envelope   JobEnvelope
+	sequenceId int
+	completed  bool
+	troop      *Troop
+	bob        Bob
+	sub        bridge.Subscription
+}
+
+func CreateJob(bob Bob) *Job {
+	id := uuid.New()
+	return &Job{
+		bob: bob,
+		Id:  id.String(),
+	}
 }
 
 func (job *Job) Run(completedChannel chan JobEnvelope) {
-	done := make(chan bool, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
 
+	jobReplyDest := fmt.Sprintf("/temp-queue/%s-%s", job.troop.Name, RandomString(6))
+	job.sub, _ = job.troop.bridgeConnection.SubscribeReplyDestination(jobReplyDest)
+
+	job.Envelope = JobEnvelope{
+		Id:      job.Id,
+		Payload: job.bob.GetInput(),
+		SentBy:  fmt.Sprintf("job-%s", job.Id),
+		Version: 1,
+		Hops:    0,
+	}
+	b64, _ := EncodeGobToBase64(job.Envelope)
 
 	go func() {
-		// listen for incoming messages from subscription.
 		for {
-			utils.Log.Infof("listening for responses")
-			m := <-job.troop.replySubscription.GetMsgChannel()
-			utils.Log.Infof("job completed: %v", string(m.Payload.([]byte)))
-			done <- true
+			m := <-job.sub.GetMsgChannel()
+			val, _ := DecodeBase64ToGob(string(m.Payload.([]byte)))
+			job.Envelope = *val
+			job.bob.HandleOutput(job.Envelope.Payload)
+			wg.Done()
 			return
 		}
 	}()
 
-	/*
-	var network bytes.Buffer        // Stand-in for a network connection
-	    enc := gob.NewEncoder(&network) // Will write to network.
-	    dec := gob.NewDecoder(&network) // Will read from network.
-	    // Encode (send) the value.
-	    err := enc.Encode(P{3, 4, 5, "Pythagoras"})
-	    if err != nil {
-	        log.Fatal("encode error:", err)
-	    }
-	    // Decode (receive) the value.
-	 */
+	job.troop.bridgeConnection.SendMessageWithReplyDestination("/queue/"+job.troop.Name,
+		jobReplyDest, "text/plain", []byte(b64), nil)
 
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-
-	env := JobEnvelope{
-		Id:  "123456",
-		Payload :"Magic pizza",
-	}
-	err := enc.Encode(env)
-	if err != nil {
-		utils.Log.Panicf("failed")
-	}
-
-	var b64 = base64.StdEncoding.EncodeToString(buf.Bytes())
-
-
-
-	job.troop.bridgeConnection.SendMessageWithReplyDestination("/queue/" + job.troop.Name,
-		"/temp-queue/" + job.troop.Name,"text/plain", []byte(b64),nil)
-
-	<- done
-
-	utils.Log.Infof("job done")
+	wg.Wait()
 	job.completed = true
-	completedChannel <- env
+	completedChannel <- job.Envelope
 }
-
-//func (job *Job) HasCompleted() {
-//	return job.completed
-//}

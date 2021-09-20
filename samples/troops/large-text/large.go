@@ -15,7 +15,7 @@ func (job myJob) GetInput() string {
 }
 
 func (job myJob) HandleOutput(result string) {
-	utils.Log.Infof("my job result for %s is: %s", job.data, result)
+	utils.Log.Infof("the size of my response is %v bytes", len(result))
 }
 
 func main() {
@@ -30,24 +30,19 @@ func main() {
 		BrokerConnectorConfig: config,
 	})
 
-	troop := bobajob.NewTroop("reverse-string")
-
-	job1 := bobajob.CreateJob(myJob{data: "kittens"})
-	job2 := bobajob.CreateJob(myJob{data: "lemons"})
-	job3 := bobajob.CreateJob(myJob{data: "racecar"})
-	job4 := bobajob.CreateJob(myJob{data: "potatoes"})
-	job5 := bobajob.CreateJob(myJob{data: "yummymummy"})
-	job6 := bobajob.CreateJob(myJob{data: "waterpark"})
-
-	troop.AddJobs([]*bobajob.Job{job1, job2, job3, job4, job5, job6})
-
-	leader.AddTroop(troop)
-
 	err := leader.Connect()
 	if err != nil {
 		utils.Log.Errorf("unable to connect. %s", err.Error())
 		return
 	}
+
+	troop := bobajob.NewTroop("reverse-string")
+
+	for i := 0; i < 100; i++ {
+		troop.AddJob(bobajob.CreateJob(myJob{data: bobajob.RandomString(11000000)}))
+	}
+
+	leader.AddTroop(troop)
 
 	leader.Run()
 	leader.Disconnect()

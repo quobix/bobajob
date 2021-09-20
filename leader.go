@@ -5,6 +5,7 @@ import (
 	"github.com/vmware/transport-go/bridge"
 	"github.com/vmware/transport-go/bus"
 	"github.com/vmware/transport-go/plank/utils"
+	"sync"
 )
 
 type LeaderConfig struct {
@@ -14,7 +15,7 @@ type LeaderConfig struct {
 
 type LeaderReport struct {
 	Success bool
-	Errors []string
+	Errors  []string
 }
 
 type Leader struct {
@@ -28,7 +29,7 @@ func NewLeader(config LeaderConfig) *Leader {
 	if config.name == "" {
 		config.name = fmt.Sprintf("bobajob-leader-%s", RandomString(5))
 	}
-	return &Leader{ config: config }
+	return &Leader{config: config}
 }
 
 func (l *Leader) Connect() error {
@@ -44,22 +45,27 @@ func (l *Leader) Connect() error {
 		return err
 	}
 	utils.Log.Infof("leader is connected to broker, sessionID is: %s", l.bridgeConnection.GetId().String())
-	l.subscribeTroops()
+
+	for _, t := range l.troops {
+		t.bridgeConnection = l.bridgeConnection
+	}
+
 	return nil
 }
 
-func (l *Leader) subscribeTroops() {
-	for _, t := range l.troops {
-		t.Subscribe(l.bridgeConnection)
-	}
+func (l *Leader) Disconnect() {
+	l.bridgeConnection.Disconnect()
 }
 
-
 func (l *Leader) AddTroop(t *Troop) {
+	t.bridgeConnection = l.bridgeConnection
 	l.troops = append(l.troops, t)
 }
 
 func (l *Leader) AddTroops(t []*Troop) {
+	for _, tr := range t {
+		tr.bridgeConnection = l.bridgeConnection
+	}
 	l.troops = append(l.troops, t...)
 }
 
@@ -67,14 +73,16 @@ func (l *Leader) Run() (chan *LeaderReport, error) {
 	if len(l.troops) <= 0 {
 		return nil, fmt.Errorf("cannot run, no troops defined for leader %s", l.config.name)
 	}
+
+	var wg sync.WaitGroup
+	wg.Add(len(l.troops))
 	for _, t := range l.troops {
-		t.Run()
+		go t.Run(&wg)
 	}
-
-
-
+	wg.Wait()
+	// all done.
 
 	lrChan := make(chan *LeaderReport, 1)
-	lrChan <- &LeaderReport{ Success: false}
+	lrChan <- &LeaderReport{Success: false}
 	return lrChan, nil
 }

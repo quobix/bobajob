@@ -1,26 +1,22 @@
 package bobajob
 
 import (
-	"fmt"
 	"github.com/vmware/transport-go/bridge"
-	"github.com/vmware/transport-go/plank/utils"
+	"sync"
 )
 
 type Troop struct {
-	Jobs []*Job
-	Name string
-	CompletedChan chan bool
-	jobChannel chan JobEnvelope
+	Jobs             []*Job
+	Name             string
+	CompletedChan    chan bool
 	bridgeConnection bridge.Connection
-	replySubscription bridge.Subscription
-	troopSubscription bridge.Subscription
+	jobResults       map[string]JobEnvelope
 }
 
 func NewTroop(name string) *Troop {
 	return &Troop{
-		Name: name,
-		CompletedChan: make(chan bool, 1),
-		jobChannel: make(chan JobEnvelope),
+		Name:       name,
+		jobResults: make(map[string]JobEnvelope),
 	}
 }
 
@@ -36,35 +32,39 @@ func (t *Troop) AddJobs(jobs []*Job) {
 	t.Jobs = append(t.Jobs, jobs...)
 }
 
-func (t *Troop) Subscribe(bc bridge.Connection) {
-	t.bridgeConnection = bc
-	utils.Log.Infof("troop subscribing to reply queue %s", t.Name)
-	t.replySubscription, _ = t.bridgeConnection.SubscribeReplyDestination("/temp-queue/" + t.Name)
-	//t.troopSubscription, _ = t.bridgeConnection.Subscribe("/queue/" + t.Name)
-}
+func (t *Troop) Run(wg *sync.WaitGroup) {
 
-func (t *Troop) Run() {
-	if len(t.Jobs) <= 0 {
+	jc := len(t.Jobs)
+	if jc <= 0 {
 		close(t.CompletedChan)
 	}
+
+	jChan := make(chan JobEnvelope)
+
 	for _, j := range t.Jobs {
-		go j.Run(t.jobChannel)
+		go j.Run(jChan)
 	}
-	var count = 0
-	for {
-		select {
-		case <-t.jobChannel:
-			count++
-			if count == len(t.Jobs) {
-				fmt.Printf("we have %v jobs completed\n", count)
-				t.CompletedChan <- true
-				break
-			}
+
+	var jwg sync.WaitGroup
+	jwg.Add(len(t.Jobs))
+
+	go func() {
+		for {
+			je := <-jChan
+			t.jobResults[je.Id] = je
+			jwg.Done()
 		}
-	}
+	}()
+
+	jwg.Wait()
+	wg.Done()
 }
 
-func (t *Troop) JobsCompleted() (int,int) {
+func (t *Troop) GetJobResults() map[string]JobEnvelope {
+	return t.jobResults
+}
+
+func (t *Troop) JobsCompleted() (int, int) {
 	completed := 0
 	for _, i := range t.Jobs {
 		if i.completed {
@@ -73,4 +73,3 @@ func (t *Troop) JobsCompleted() (int,int) {
 	}
 	return completed, len(t.Jobs)
 }
-

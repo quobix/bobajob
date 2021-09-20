@@ -1,9 +1,6 @@
 package bobajob
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/gob"
 	"fmt"
 	"github.com/vmware/transport-go/bridge"
 	"github.com/vmware/transport-go/bus"
@@ -11,7 +8,7 @@ import (
 )
 
 type JobHandler interface {
-	HandleJob(job JobEnvelope) JobResult
+	HandleJob(job JobEnvelope) string
 }
 
 type ScoutConfig struct {
@@ -19,22 +16,20 @@ type ScoutConfig struct {
 	*bridge.BrokerConnectorConfig
 }
 
-
 type Scout struct {
-	config ScoutConfig
+	config  ScoutConfig
 	handler JobHandler
 	bus.EventBus
 	bridgeConnection bridge.Connection
-	subscription bridge.Subscription
-	finishedChan chan bool
+	subscription     bridge.Subscription
+	finishedChan     chan bool
 }
-
 
 func NewScout(config ScoutConfig) *Scout {
 	if config.Name == "" {
 		config.Name = fmt.Sprintf("bobajob-scout-%s", RandomString(5))
 	}
-	return &Scout{ config: config, finishedChan: make(chan bool)}
+	return &Scout{config: config, finishedChan: make(chan bool)}
 }
 
 func (s *Scout) RegisterHandler(jobHandler JobHandler) {
@@ -54,59 +49,49 @@ func (s *Scout) Connect() error {
 		return err
 	}
 	utils.Log.Infof("scout is now connected to broker, sessionID is: %s", s.bridgeConnection.GetId().String())
-	s.Subscribe()
 	return nil
 }
 
-func (s *Scout) Subscribe() {
+func (s *Scout) subscribe() {
 	s.subscription, _ = s.bridgeConnection.Subscribe("/queue/" + s.config.Name)
 }
 
 func (s *Scout) ListenForJob() {
+	s.subscribe()
 	for {
 		select {
-			case <-s.finishedChan:
-				utils.Log.Infof("shutting down now.")
-				return
-			case m := <- s.subscription.GetMsgChannel():
+		case <-s.finishedChan:
+			utils.Log.Infof("shutting down now.")
+			return
+		case m := <-s.subscription.GetMsgChannel():
 
-				var b64 = m.Payload.([]byte)
-				gobBits, err := base64.StdEncoding.DecodeString(string(b64))
-				if err != nil {
-					utils.Log.Fatal(err.Error())
-					return
+			je, _ := DecodeBase64ToGob(string(m.Payload.([]byte)))
+			jr := s.handler.HandleJob(*je)
+
+			utils.Log.Infof("job completed: %v", je.Id)
+			var replyTo string
+			for _, h := range m.Headers {
+				if h.Label == "reply-to" {
+					replyTo = h.Value
 				}
+			}
 
-				var buf bytes.Buffer
-				buf.Write(gobBits)
+			je.Payload = jr
+			je.HandledBy = fmt.Sprintf("scout-%s-%s", s.config.Name, RandomString(5))
+			je.Version++
+			je.Hops++
 
-				enc := gob.NewDecoder(&buf)
-
-				var je JobEnvelope
-				err = enc.Decode(&je)
-				if err != nil {
-					utils.Log.Fatal("failed")
-				}
-				jr := s.handler.HandleJob(je)
-
-				utils.Log.Infof("render completed.%s.%v", jr.Payload, je.Id)
-				var replyTo string
-				for _, h := range m.Headers {
-					if h.Label == "reply-to" {
-						replyTo = h.Value
-					}
-				}
-				s.SendCompletedJobBack(replyTo)
+			s.SendCompletedJobBack(replyTo, je)
 		}
 
 	}
 }
 
-func (s *Scout) SendCompletedJobBack(destination string) {
-	s.bridgeConnection.SendMessage(destination, "text/plain", []byte("rice"))
+func (s *Scout) SendCompletedJobBack(destination string, je *JobEnvelope) {
+	b64, _ := EncodeGobToBase64(*je)
+	s.bridgeConnection.SendMessage(destination, "text/plain", []byte(b64))
 }
 
 func (s *Scout) Unsubscribe() {
 	s.subscription.Unsubscribe()
 }
-
